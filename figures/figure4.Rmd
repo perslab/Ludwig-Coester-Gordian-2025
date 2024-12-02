@@ -1,0 +1,580 @@
+
+# Configurations
+```{r}
+library(openxlsx)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(ggrastr)
+library(reshape2)
+library(lme4)
+library(emmeans)
+library(dplyr)
+library(tidyverse)
+library(Seurat)
+library(foreach)
+library(doParallel)
+```
+```{r}
+neurons <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/Seurat_objs/integrated/neurons_Seurat_obj_labels.rds")
+
+rat.AUC <- read.csv("/projects/perslab/people/jmg776/projects/DVC/output/SCENIC/DVC_rat_neurons/DVC_rat_neurons_auc.csv", header = TRUE, row.names = 1)
+mouse.AUC <- read.csv("/projects/perslab/people/jmg776/projects/DVC/output/SCENIC/DVC_mouse_neurons/DVC_mouse_neurons_auc.csv", header = TRUE, row.names = 1)
+
+DEGs.sc.mouse.neurons.acute <-readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/single-cell/DESeq2_mouse_neurons_acute.rds")
+DEGs.sc.mouse.glia.acute <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/single-cell/DESeq2_mouse_glia_acute.rds")
+DEGs.sc.mouse.acute <- c(DEGs.sc.mouse.glia.acute, DEGs.sc.mouse.neurons.acute)
+DEGs.sc.rat.neurons.acute <-readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/single-cell/DESeq2_rat_neurons_acute.rds")
+DEGs.sc.rat.glia.acute <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/single-cell/DESeq2_rat_glia_acute.rds")
+DEGs.sc.rat.acute <- c(DEGs.sc.rat.glia.acute, DEGs.sc.rat.neurons.acute)
+
+DEGs.sc.mouse.neurons.chronic <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/single-cell/DESeq2_mouse_neurons_chronic.rds")
+DEGs.sc.mouse.glia.chronic <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/single-cell/DESeq2_mouse_glia_chronic.rds")
+DEGs.sc.mouse.chronic <- c(DEGs.sc.mouse.glia.chronic, DEGs.sc.mouse.neurons.chronic)
+
+DEGs.sc.rat.neurons.chronic <-readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/single-cell/DESeq2_rat_neurons_chronic.rds")
+DEGs.sc.rat.glia.chronic <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/single-cell/DESeq2_rat_glia_chronic.rds")
+DEGs.sc.rat.chronic <- c(DEGs.sc.rat.glia.chronic, DEGs.sc.rat.neurons.chronic)
+
+DEGs.bulk.mouse.acute <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/bulk/DESeq2_mouse_acute.rds")
+DEGs.bulk.rat.acute <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/bulk/DESeq2_rat_acute.rds")
+DEGs.bulk.mouse.chronic <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/bulk/DESeq2_mouse_chronic.rds")
+DEGs.bulk.rat.chronic <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/bulk/DESeq2_rat_chronic.rds")
+
+glmnet.data <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/DEGs/bulk/glmnet.rds")
+
+neurons$cell.type <- gsub("_(\\d+)_", "\\1.", neurons$cell.type)
+names(DEGs.sc.mouse.acute) <- gsub("_(\\d+)_", "\\1.", names(DEGs.sc.mouse.acute))
+names(DEGs.sc.rat.acute) <- gsub("_(\\d+)_", "\\1.", names(DEGs.sc.rat.acute))
+names(DEGs.sc.mouse.chronic) <- gsub("_(\\d+)_", "\\1.", names(DEGs.sc.mouse.chronic))
+names(DEGs.sc.rat.chronic) <- gsub("_(\\d+)_", "\\1.", names(DEGs.sc.rat.chronic))
+```
+
+# 4a SCENIC analysis
+```{r}
+identify_da_regulons <- function(seurat_obj, celltypes, group1, group2) {
+  lmer_results <- foreach(celltype = celltypes) %dopar% {
+    
+    seurat_obj_sub <- subset(seurat_obj, cell.type == celltype & treatment %in% c(group2, group1))
+    sample_ids <- unique(seurat_obj_sub$hash.ID)
+    
+    regulons <- rownames(seurat_obj_sub@assays$regulon)[
+      which(apply(seurat_obj_sub@assays$regulon@data, 1, function(x) {
+        sum(x != 0) >= (ncol(seurat_obj_sub) * 0.20)
+      }))
+    ]
+    
+    regulons <- "Fos..."  # Placeholder to be replaced by actual regulons selection criteria
+    
+    # Prepare data for modeling
+    data <- cbind.data.frame(
+      treatment = as.factor(seurat_obj_sub$treatment), 
+      sample = as.factor(seurat_obj_sub$hash.ID),
+      pool = as.factor(seurat_obj_sub$pool),
+      run = as.factor(seurat_obj_sub$run),
+      calcr = seurat_obj_sub@assays$SCT@data["Calcr",],
+      treatment = factor(seurat_obj_sub$treatment, levels = c(group2, group1))
+    )
+    
+    results <- data.frame(matrix(NA, nrow = length(regulons), ncol = 4))
+    colnames(results) <- c("regulon", "beta", "SE", "p_value")
+    
+    for (i in seq_along(regulons)) {
+      set.seed(i)
+      data$regulon <- seurat_obj_sub@assays$regulon@data[regulons[i],]
+      
+      # Linear mixed effects model
+      model <- lmer(
+        regulon ~ treatment + calcr + (1 | sample),
+        data = data,
+        REML = TRUE
+      )
+      
+      emm <- lsmeans(model, pairwise ~ treatment, adjust = NULL)
+      emm_summary <- summary(emm$contrasts)
+      
+      results$regulon[i] <- regulons[i]
+      contrast <- paste0("(", group1, ") - (", group2, ")")
+      results$p_value[i] <- emm_summary$p.value[which(emm_summary$contrast == contrast)]
+      results$SE[i] <- emm_summary$SE[which(emm_summary$contrast == contrast)]
+      results$beta[i] <- emm_summary$estimate[which(emm_summary$contrast == contrast)]
+    }
+    
+    results$celltype <- celltype
+    results
+  }
+  
+  names(lmer_results) <- celltypes
+  return(lmer_results)
+}
+
+process_SCENIC_data <- function(species) {
+  # Set parameters based on species
+  if (species == "mouse") {
+    seurat_obj <- mouse_neurons
+    comparison_acute <- "Cagrilintide vs. vehicle (4 hours)"
+    comparison_chronic <- "Cagrilintide vs. weight-matched control (8 days)"
+  } else if (species == "rat") {
+    seurat_obj <- rat_neurons
+    comparison_acute <- "Cagrilintide vs. vehicle control (4 hours)"
+    comparison_chronic <- "Cagrilintide vs. weight-matched control (8 days)"
+  }
+  
+  # Process acute data
+  lmer_acute <- identify_da_regulons(
+    seurat_obj = seurat_obj,
+    celltypes = c("Glu0.2", "Glu2.1", "Glu2.2", "Glu5.2", "Glu6.0", "Glu6.2"),
+    group1 = "A8-A",
+    group2 = "V-A"
+  )
+  lmer_acute <- dplyr::bind_rows(lmer_acute, .id = "celltype")
+  lmer_acute$p_adj <- p.adjust(lmer_acute$p_value, method = "fdr")
+  lmer_acute$comparison <- comparison_acute
+  
+  # Process chronic data
+  lmer_chronic <- identify_da_regulons(
+    seurat_obj = seurat_obj,
+    celltypes = c("Glu0.2", "Glu2.1", "Glu2.2", "Glu5.2", "Glu6.0", "Glu6.2"),
+    group1 = "A8-C",
+    group2 = "WM-C"
+  )
+  lmer_chronic <- dplyr::bind_rows(lmer_chronic, .id = "celltype")
+  lmer_chronic$p_adj <- p.adjust(lmer_chronic$p_value, method = "fdr")
+  lmer_chronic$comparison <- comparison_chronic
+  
+  # Combine acute and chronic data
+  lmer_combined <- rbind(lmer_acute, lmer_chronic)
+  lmer_combined$celltype <- factor(
+    lmer_combined$celltype,
+    levels = c("Glu0.2", "Glu2.1", "Glu2.2", "Glu5.2", "Glu6.0", "Glu6.2")
+  )
+  
+  # Add significance symbols
+  lmer_combined$p_symbol <- ""
+  lmer_combined$p_symbol[lmer_combined$p_adj < 0.05] <- "*"
+  lmer_combined$p_symbol[lmer_combined$p_adj < 0.01] <- "**"
+  lmer_combined$p_symbol[lmer_combined$p_adj < 0.001] <- "***"
+  
+  # Add species column
+  lmer_combined$species <- species
+  
+  # Extract time point from comparison
+  lmer_combined$time_point <- ifelse(grepl("4 hours", lmer_combined$comparison), "4 hours", "8 days")
+  
+  return(lmer_combined)
+}
+
+# Set up intermediary objects
+mouse_neurons <- subset(neurons, dataset == "mouse.2023")
+mouse_neurons[["regulon"]] <- CreateAssayObject(data = t(as.matrix(mouse.AUC)))
+
+rat_neurons <- subset(neurons, species == "rat")
+rat_neurons[["regulon"]] <- CreateAssayObject(data = t(as.matrix(rat.AUC)))
+
+# Process SCENIC data
+lmer_mouse <- process_SCENIC_data("mouse")
+lmer_rat <- process_SCENIC_data("rat")
+
+lmer_combined <- rbind(lmer_mouse, lmer_rat) %>%
+  mutate(
+    x = as.numeric(celltype),
+    x = ifelse(species == "mouse", x - 0.2, x + 0.2)  # Small offset for subsequent plotting
+  )
+```
+```{r}
+signif_data <- lmer_combined %>%  # Adding significance symbols to plot
+  filter(p_symbol != "") %>%
+  mutate(y = beta + SE + 0.001)
+
+p <- ggplot(lmer_combined, aes(x = celltype, y = beta, color = species, group = species)) +
+  geom_point(size = 1, position = position_dodge(width = 0.6)) +
+  geom_errorbar(
+    aes(ymin = beta - SE, ymax = beta + SE),
+    width = 0.1,
+    position = position_dodge(width = 0.6)
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.1) +
+  theme_pubr(base_size = 6, base_family = "sans") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top",  # Place legend above the plot
+    plot.margin = unit(c(0, 0, 0, 0), "cm"),
+    legend.title = element_blank()
+  ) +
+  ylab(expression(bold(beta))) +
+  xlab("") +
+  scale_color_manual(values = c("#75C0AF", "#546577"), labels = c("Mouse", "Rat")) +
+  facet_wrap(~time_point) +
+  geom_text(
+    data = signif_data,
+    aes(label = p_symbol, y = y),
+    size = 2,
+    fontface = "bold",
+    color = "black",
+    position = position_dodge(width = 0.6)
+  )
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figures/figure_4a.pdf", height = 4, width = 5)
+```
+
+# 4c. DEGs treatment vs. control after 4 hours and 8 days (all)
+```{r}
+##############
+### Format ###
+##############
+
+DEGs <- data.frame(
+  treatment = factor(c("Acute", "Subchronic", "Acute", "Subchronic")),
+  species = factor(c("mouse", "mouse", "rat", "rat"), levels = c("mouse", "rat")),
+  sign_genes = c(  # Summarizing all significant genes across species and conditions
+    sum(DEGs.bulk.mouse.acute$padj < 0.05, na.rm = TRUE),
+    sum(DEGs.bulk.mouse.chronic$padj < 0.05, na.rm = TRUE),
+    sum(DEGs.bulk.rat.acute$padj < 0.05, na.rm = TRUE),
+    sum(DEGs.bulk.rat.chronic$padj < 0.05, na.rm = TRUE)
+  )
+)
+```
+```{r}
+############
+### Plot ###
+############
+
+p <- ggplot(DEGs, aes(x = treatment, y = sign_genes, fill = species)) +
+  geom_bar(stat = "identity", width = 0.6, position = "dodge", size = 0.3, color = "black") +
+  theme_pubr(base_size = 6, base_family = "sans") +
+  theme(
+    legend.position = "top",
+    text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.line = element_line(color = "black", size = 0.3),
+    axis.ticks = element_line(color = "black", size = 0.3),
+    legend.key.height = unit(1, "mm"),
+    legend.key.width = unit(2, "mm"),
+    legend.title = element_blank()
+  ) +
+  labs(y = "Differentially expressed genes") +
+  scale_fill_manual(values = c("#75C0AF", "#546577"), labels = c("Mouse", "Rat")) +
+  scale_x_discrete(labels = c("4 hours", "8 days"))
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figures/figure_4c.pdf", height = 4, width = 5)
+```
+
+# 4d. Accuracy of regularized logistic regression classifiers
+```{r}
+##############
+### Format ###
+##############
+
+glmnet_data <- glmnet.data %>%
+    mutate(
+        accuracy = accuracy * 100,
+        species = gsub(".acute|.chronic", "", rownames(.)),
+        study = gsub("mouse.|rat.", "", rownames(.))
+    )
+```
+```{r}
+############
+### Plot ###
+############
+
+p <- ggplot(glmnet_data, aes(x = study, y = accuracy, fill = species)) +
+  geom_bar(stat = "identity", width = 0.5, position = "dodge", size = 0.3, color = "black") +
+  theme_classic(base_size = 6, base_family = "sans") +
+  theme(
+    legend.position = "top",
+    text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.line = element_line(color = "black", size = 0.3),
+    axis.ticks = element_line(color = "black", size = 0.3),
+    legend.key.height = unit(1, "mm"),
+    legend.key.width = unit(2, "mm"),
+    legend.title = element_blank()
+  ) +
+  labs(y = "Accuracy (%)") +
+  scale_fill_manual(values = c("#75C0AF", "#546577"), labels = c("Mouse", "Rat")) +
+  scale_x_discrete(labels = c("4 hours", "8 days")) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 25))
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figure_4d.pdf", height = 4, width = 5)
+```
+
+# 4e. DEGs treatment vs. control after 4 hours and 8 days (subset)
+```{r}
+get_DEGs_data <- function(celltypes, DEGs_sc_rat, DEGs_sc_mouse, comparison_label) {
+  DEGs_data <- data.frame(celltype = celltypes, mouse = NA, rat = NA, stringsAsFactors = FALSE)
+  
+  for (i in seq_along(celltypes)) {
+    celltype <- celltypes[i]
+    
+    # Rat DEGs
+    if (!is.null(DEGs_sc_rat[[celltype]])) {
+      DEGs_data$rat[i] <- sum(DEGs_sc_rat[[celltype]]$padj < 0.05, na.rm = TRUE)
+    }
+    
+    # Mouse DEGs
+    if (!is.null(DEGs_sc_mouse[[celltype]])) {
+      DEGs_data$mouse[i] <- sum(DEGs_sc_mouse[[celltype]]$padj < 0.05, na.rm = TRUE)
+    }
+  }
+  
+  DEGs_data$comparison <- comparison_label
+  return(DEGs_data)
+}
+
+celltypes <- c("Glu0.2", "Glu2.1", "Glu2.2", "Glu5.2", "Glu6.0", "Glu6.2")
+
+# Acute DEGs
+DEGs_sc_acute <- get_DEGs_data(
+  celltypes,
+  DEGs.sc.rat.acute,
+  DEGs.sc.mouse.acute,
+  "Cagrilintide vs. vehicle control (4 hours)"
+)
+
+# Chronic DEGs
+DEGs_sc_chronic <- get_DEGs_data(
+  celltypes,
+  DEGs.sc.rat.chronic,
+  DEGs.sc.mouse.chronic,
+  "Cagrilintide vs. weight-matched control (8 days)"
+)
+
+# Combine and format
+DEGs <- rbind(DEGs_sc_acute, DEGs_sc_chronic)
+DEGs_melt <- melt(DEGs, id.vars = c("celltype", "comparison"))
+colnames(DEGs_melt) <- c("celltype", "comparison", "species", "genes")
+DEGs_melt$genes[is.na(DEGs_melt$genes)] <- 0  # One instance where DEGs is NA, need to account for that
+```
+```{r}
+############
+### Plot ###
+############
+
+p <- ggplot(DEGs_melt, aes(x = celltype, y = genes, fill = species)) +
+  geom_bar(position = position_dodge(), stat = "identity", color = "black", width = 0.8) +
+  facet_wrap(~comparison, ncol = 1) +
+  theme_pubr(base_size = 6, base_family = "sans") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    axis.title = element_text(face = "bold"),
+    legend.title = element_blank(),
+    strip.text = element_text(face = "bold")
+  ) +
+  xlab(NULL) +
+  ylab("Differentially Expressed Genes") +
+  scale_y_continuous(limits = c(0, max(15, max(DEGs_melt$genes, na.rm = TRUE)))) +
+  scale_fill_manual(values = c("#75C0AF", "#546577"))
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figures/figure_4e.pdf", width = 5, height = 4)
+```
+
+# 4f. Volcano (bulk)
+```{r}
+##############
+### Format ###
+##############
+
+volcano <- DEGs.bulk.rat.chronic %>%
+  filter(!is.na(padj)) %>%
+  mutate(
+    label = if_else(padj == min(padj), rownames(.), ""),  # Adds label to the smallest adj. pvalue for subsequent plotting
+    col = case_when(
+      padj <= 0.05 & abs(log2FoldChange) >= 0.5 ~ 1,  # Setting color levels based on numeric value
+      padj <= 0.05 & abs(log2FoldChange) < 0.5  ~ 2,
+      padj > 0.05 & abs(log2FoldChange) >= 0.5  ~ 3,
+      TRUE                                      ~ 4
+    )
+  ) %>%
+  select(log2FoldChange, padj, col, label)
+```
+```{r}
+############
+### Plot ###
+############
+
+p <- ggplot(volcano, aes(y = -log10(padj), x = log2FoldChange,
+                                    fill = factor(col), label = label)) +
+  geom_point(shape = 21, size = 3, alpha = 1, stroke = 0.2) + 
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed") + 
+  geom_text_repel(fontface = "bold.italic", size = 2, max.overlaps = 20) + 
+  theme_pubr(base_size = 6, base_family = "sans") +
+  theme(legend.position = "none",
+        axis.title = element_text(face = "bold"),
+        axis.text = element_text(face = "bold"),
+        axis.line = element_line(size = 0.4),
+        plot.margin = margin(0, 0, 0, 0, "cm")) +
+  xlab(expression(bold(Log[2] * " fold-change"))) + 
+  ylab(expression(bold(-log[10] * "(" * italic(P) * ")"))) + 
+  scale_fill_manual(values = c("1" = "#95567D", "2" = "#F9D4EC", 
+                               "3" = "grey70", "4" = "grey90")) +
+  xlim(c(-2.5, 2.5))  # Cuts off 9 points in total, but these points are not interesting
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figures/figure_4f.pdf", width = 5, height = 4)
+```
+
+# 4g. Prlh feature plot
+```{r}
+##############
+### Format ###
+##############
+
+rat_neurons <- subset(neurons, dataset == "rat.2023")
+DefaultAssay(rat_neurons) <- "RNA"
+
+# Identify cells where Prlh expression is greater than 5
+rat_prlh_cells <- WhichCells(rat_neurons, expression = Prlh > 5)  # To avoid making a whole new code block for Calcr, just change Prlh to Calcr here and run rest of code
+
+# Prepare UMAP plot data
+umap_embed_rat_neurons <- neurons@reductions$umap@cell.embeddings %>%
+  as.data.frame() %>%
+  mutate(
+    species = neurons$species,
+    celltype = neurons$cell.type,
+    Prlh_expressed = rownames(.) %in% rat_prlh_cells,  # Label cells where 'Prlh' is expressed
+    color_group = ifelse(Prlh_expressed, as.character(species), "Not expressed"),
+    color_group = factor(color_group, levels = c("rat", "Not expressed"))
+  ) %>%
+  sample_frac(1) %>%  # Shuffle rows
+  arrange(desc(color_group == "Not expressed"))  # Ensure background is plotted first, so real point on top of them, making them visible
+
+label <- umap_embed_rat_neurons %>%
+  group_by(celltype) %>%
+  summarize(
+    x = median(UMAP_1),
+    y = median(UMAP_2)
+  )
+```
+```{r}
+############
+### Plot ###
+############
+
+p <- ggplot(umap_embed_rat_neurons, aes(x = UMAP_1, y = UMAP_2, color = color_group)) +
+  geom_point_rast(size = 0.1, alpha = 0.5) +
+  theme_pubr(base_size = 6, base_family = "sans") +
+  theme(
+    axis.line = element_line(colour = "black", size = 0.4),
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    legend.position = "right",
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(face = "bold")
+  ) +
+  scale_color_manual(values = c("rat" = "#546577", "Not expressed" = "grey"), name = "Expression")
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figures/figure_4g.pdf", width = 5, height = 4)
+```
+
+# 4h. Prlh expression in rat single-cell data
+```{r}
+##############
+### Format ###
+##############
+
+neurons_sub <- neurons %>%
+  subset(
+    species == "rat" &
+      cell.type == "Glu6.2" &
+      treatment %in% c("A8-A", "A8-C", "V-A", "WM-C")
+  ) %>%
+  subset(
+    hash.ID %in% names(which(table(hash.ID) >= 5))  # Remove samples with fewer than 5 cells
+  )
+DefaultAssay(neurons_sub) <- "RNA"
+
+genes <- rownames(neurons_sub)[rowMeans(neurons_sub@assays$RNA@counts != 0) >= 0.1]  # Get genes expressed in at least 10% of the cells
+samples <- unique(neurons_sub$hash.ID)
+
+# Prepare pseudobulk data
+pseudo_data <- data.frame(matrix(NA, nrow = length(genes), ncol = length(samples)))
+rownames(pseudo_data) <- genes
+colnames(pseudo_data) <- samples
+
+pseudo_meta <- data.frame(
+  sample = samples,
+  treatment = NA,
+  stringsAsFactors = FALSE
+)
+
+# Compute pseudobulk data using a for-loop
+for (j in seq_along(samples)) {
+  sample_cells <- which(neurons_sub$hash.ID == samples[j])
+  pseudo_data[, j] <- rowMeans(neurons_sub@assays$RNA@counts[genes, sample_cells, drop = FALSE])
+  pseudo_meta$treatment[j] <- unique(neurons_sub$treatment[sample_cells])
+}
+
+# Prepare expression data
+expr_data <- cbind.data.frame(t(pseudo_data), treatment = factor(pseudo_meta$treatment))
+expr_data <- melt(expr_data, id.vars = "treatment")
+colnames(expr_data) <- c("treatment", "gene", "expr")
+
+expr_data$time <- "4 hours"
+expr_data$time[grep("-C", expr_data$treatment)] <- "8 days"
+expr_data$drug <- "Vehicle"
+expr_data$drug[grep("A8-", expr_data$treatment)] <- "Cagrilintide"
+
+# Prepare DGE results
+prlh_expr <- subset(expr_data, gene == "Prlh")
+p_values <- c(
+  DEGs.sc.rat.acute[["Glu6.2"]]["Prlh", "pvalue"],
+  DEGs.sc.rat.chronic[["Glu6.2"]]["Prlh", "pvalue"]
+)
+p_values <- round(p_values, 3)
+p_symbol <- ifelse(p_values <= 0.05, p_values, "NS")
+```
+```{r}
+############
+### Plot ###
+############
+
+p <- ggplot(prlh_expr, aes(x = time, y = expr, fill = drug)) +
+  geom_boxplot(
+    outlier.shape = NA,
+    position = position_dodge(0.6),
+    width = 0.5
+  ) +
+  theme_pubr(legend = "top") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 6, face = "bold"),
+    axis.text.y = element_text(size = 6, face = "bold"),
+    axis.title.y = element_text(size = 6, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 8, face = "bold.italic"),
+    legend.text = element_text(size = 6, face = "bold"),
+    legend.title = element_blank()
+  ) +
+  scale_fill_manual(values = c("#AFC3E4", "#95567D")) +
+  labs(
+    y = "Pseudobulk expression",
+    x = "",
+    title = "Prlh"
+  ) +
+  coord_cartesian(ylim = c(0, 15)) +
+  geom_signif(
+    y_position = c(9, 14),
+    xmin = c(0.85, 1.85),
+    xmax = c(1.15, 2.15),
+    annotation = p_symbol,
+    tip_length = 0.01,
+    textsize = 2,
+    size = 0.2
+  )
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figures/figure_4h.pdf", width = 5, height = 4)
+```

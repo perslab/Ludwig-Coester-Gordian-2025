@@ -1,0 +1,230 @@
+
+# Configurations
+```{r}
+library(Seurat)
+library(tidyverse)
+library(ggpubr)
+library(ggrepel)
+library(ggrastr)
+library(RColorBrewer)
+library(ggdendro)
+library(cowplot)
+library(reshape2)
+library(gtools)
+```
+```{r}
+neurons <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/Seurat_objs/integrated/neurons_Seurat_obj_labels.rds")
+glia <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/Seurat_objs/integrated/glia_Seurat_obj.rds")
+
+neurons$cell.type <- gsub("_(\\d+)_", "\\1.", neurons$cell.type)
+glia$cell.type <- gsub("_", " ", glia$cell.type)
+```
+
+# 1b. UMAP of neurons colored by cell type
+```{r}
+##############
+### Format ###
+##############
+
+umap_embed_neurons <- as.data.frame(neurons@reductions$umap@cell.embeddings) %>%
+  mutate(
+    celltype = neurons$cell.type,
+    celltype_numeric = as.numeric(factor(celltype, levels = str_sort(unique(celltype), numeric = TRUE))) # Assign numeric IDs to cell types sorted numerically (ensures 'Glu9.0' precedes 'Glu10.0')
+  )
+
+label <- umap_embed_neurons %>%
+  group_by(celltype_numeric) %>%
+  summarize(x = median(UMAP_1), y = median(UMAP_2))
+
+```
+```{r}
+############
+### Plot ###
+############
+
+p <- ggplot(umap_embed_neurons, aes(x = UMAP_1, y = UMAP_2, colour = factor(celltype_numeric))) +
+  geom_point_rast(size = 0.1, alpha = 0.5) +
+  theme_pubr() +
+  theme(
+    axis.line = element_line(colour = "black", linewidth = 0.5),
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    legend.position = "none",
+    axis.title = element_text(size = 6, face = "bold", family = "sans"),
+    axis.text = element_text(size = 6, face = "bold", family = "sans")
+  ) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  scale_color_manual(values = c(
+    "#6D655E", "#B45C20", "#9ABDA4", "#FEEF94", "#A6B8B3",
+    "#e586f7", "#92AEA5", "#76479F", "#8F7C00", "#8AC48E",
+    "#9D5F35", "#F0A0FF", "#0075DC", "#856249", "#FEF495",
+    "#B8228D", "#95603C", "#565AA7", "#EAF09B", "#6F94A9",
+    "#C7D69F", "#2BCE48", "#3A6DAF", "#A4BCA3", "#D2B3BA",
+    "#4C7AAD", "#ED0679", "#D80F85", "#756458", "#E3B8A5",
+    "#ABB5BB", "#005C31", "#94FFB5", "#5EF1F2", "#FEE390",
+    "#84C686", "#DDB7AC", "#AC5D26", "#610075", "#7FC97F",
+    "#F9BF89", "#CDB2C1", "#00998F", "#5D87AB", "#6651A3",
+    "#A55E2E", "#FEFA97", "#EEBB97", "#F4BD90", "#C1AFCF",
+    "#A0BAAC", "#D9E39D", "#4563AC", "#BCAED1", "#E9BA9E",
+    "#8FC195", "#666666", "#B1B3C2", "#B5C9A1", "#FDDE8F",
+    "#FDD88D", "#873E9A", "#7D6351", "#FEE992", "#81A1A7",
+    "#f6c7ff", "#FDCD8A", "#8D6143", "#E90E70", "#95BF9D",
+    "#C7B0C8", "#FDD38B", "#C2551D", "#FDC286", "#B6B1CA",
+    "#FDC788", "#FCFD99", "#E41667", "#E90680", "#A72B92"
+  )) +
+  geom_text(
+    data = label, aes(label = celltype_numeric, x = x, y = y),
+    size = 6 / .pt,
+    fontface = "bold",
+    inherit.aes = FALSE
+  )
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figures/figure_1b.pdf", height = 4, width = 5)
+```
+
+# 1c. Neuronal cell population proportion bar plot
+```{r}
+##############
+### Format ###
+##############
+
+# Extract key information
+full_df <- neurons@meta.data %>%
+  filter(species %in% c("macaque", "rat") | dataset == "mouse.2023") %>%
+  mutate(
+    celltype = cell.type,
+    celltype_numeric = as.numeric(factor(celltype, levels = str_sort(unique(celltype), numeric = TRUE))),  # Assign numeric IDs to cell types sorted numerically (ensures 'Glu9.0' precedes 'Glu10.0')
+    celltype_meta = paste0(celltype_numeric, ". ", celltype)  # Converts cell type names to '#. Celltype' to act as UMAP legend
+  ) %>%
+  count(species, celltype_numeric, celltype_meta) %>%
+  group_by(species) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ungroup() %>%
+  arrange(celltype_numeric) %>%
+  mutate(
+    celltype_meta = factor(celltype_meta, levels = unique(celltype_meta)),
+    species = factor(species, levels = c("mouse", "rat", "macaque"))
+  )
+
+# Create spacing between bar plots within each cell type
+species_offsets <- c("macaque" = -0.25, "mouse" = 0, "rat" = 0.25)
+full_df$offset <- species_offsets[as.character(full_df$species)]
+full_df$x_adj <- as.numeric(full_df$celltype_meta) + full_df$offset
+```
+```{r}
+############
+### Plot ###
+############
+
+p <- ggplot(full_df, aes(x = x_adj, y = proportion, fill = species)) +
+  geom_bar(stat = "identity", width = 0.2) +  # Adjust width as needed
+  scale_x_continuous(
+    breaks = unique(full_df$celltype_numeric), 
+    labels = levels(full_df$celltype_meta)
+  ) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +  # Display y-axis as percentages
+  scale_fill_manual(
+    values = c("mouse" = "#75C0AF", "rat" = "#546577", "macaque" = "#DC7040")
+  ) +
+  theme_minimal() +
+  labs(x = NULL, y = "Proportion", fill = "Species") +
+  theme(
+    axis.text.x = element_text(
+      angle = 90, hjust = 1, vjust = 0.5, size = 5
+    ),
+    panel.grid = element_blank()
+  )
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figures/figure_1c.pdf", p, width = 15, height = 10)  # Full figure, process further in illustrator
+```
+
+# 1d. UMAP of species in neurons
+```{r}
+##############
+### Format ###
+##############
+
+neurons <- subset(neurons, dataset %in% c("mouse.2023", "rat.2023", "macaque.2023"))
+
+umap_embed_neurons <- as.data.frame(neurons@reductions$umap@cell.embeddings) %>%
+  mutate(
+    species = factor(neurons$species, levels = c("mouse", "rat", "macaque"))
+  ) %>%
+  sample_frac(1)  # Shuffle the rows
+```
+```{r}
+############
+### Plot ###
+############
+
+p <- ggplot(umap_embed_neurons, aes(UMAP_1, UMAP_2, colour = species)) +
+  geom_point_rast(size = 0.1, alpha = 0.5) +
+  theme_pubr(base_size = 6, base_family = "sans") +
+  theme(axis.line = element_line(colour = "black", size = 0.4), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        legend.position = "right",
+        axis.title = element_text(face = "bold"),
+        axis.text = element_text(face = "bold")) + 
+  labs(x = "UMAP 1", y = "UMAP 2") + 
+  scale_color_manual(values = c("#75C0AF", "#546577", "#DC7040"))
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figures/figure_1d.pdf", height = 4, width = 5)
+```
+
+# 1e. UMAP of glial cells colored by species
+```{r}
+##############
+### Format ###
+##############
+
+umap_embed_glia <- as.data.frame(glia@reductions$umap@cell.embeddings) %>%
+  mutate(
+    celltype = glia$cell.type,
+    species = factor(glia$species, levels = c("mouse", "rat", "macaque"))
+  ) %>%
+  sample_frac(1)
+
+label <- umap_embed_glia %>%
+  group_by(celltype) %>%
+  summarize(x = median(UMAP_1), y = median(UMAP_2))
+```
+```{r}
+############
+### Plot ###
+############
+
+p <- ggplot(umap_embed_glia, aes(x = UMAP_1, y = UMAP_2, colour = species)) +
+  geom_point_rast(size = 0.1, alpha = 0.5) +
+  theme_pubr(base_size = 6, base_family = "sans") +
+  theme(
+    axis.line = element_line(colour = "black", size = 0.4),
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    legend.position = "none",
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(face = "bold")
+  ) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  scale_color_manual(values = c("#75C0AF", "#546577", "#DC7040")) +
+  geom_text(
+    data = label, aes(label = celltype, x = x, y = y),
+    size = 6 / .pt,
+    fontface = "bold",
+    inherit.aes = FALSE
+  )
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figures/figure_1e.pdf", height = 4, width = 5)
+```

@@ -1,0 +1,242 @@
+
+# Configurations
+```{r}
+library(Seurat)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(ggrastr)
+library(RColorBrewer)
+library(ggdendro)
+library(cowplot)
+library(tidyverse)
+library(reshape2)
+```
+```{r}
+neurons <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/Seurat_objs/integrated/neurons_Seurat_obj_labels.rds")
+glia <- readRDS("/projects/perslab/people/jmg776/projects/DVC/output/Seurat_objs/integrated/glia_Seurat_obj.rds")
+spatial_object <- readRDS("/projects/perslab/people/jmg776/projects/DVC/data/spatial/integrated_runs_foxj1_corrected.rds")
+spatial_meta <- readRDS("/projects/perslab/people/jmg776/projects/DVC/data/spatial/shiny_data.rds") # Extra meta data
+cellex_macaque <- read.table(gzfile("/projects/perslab/people/jmg776/projects/DVC/output/CELLEX/output/macaque_DVC_neurons_mm.esmu.csv.gz"), header = T, sep = ",", row.names = 1)
+cellex_mouse <- read.table(gzfile("/projects/perslab/people/jmg776/projects/DVC/output/CELLEX/output/mouse_DVC_neurons_mm.esmu.csv.gz"), header = T, sep = ",", row.names = 1)
+cellex_rat <- read.table(gzfile("/projects/perslab/people/jmg776/projects/DVC/output/CELLEX/output/rat_DVC_neurons_mm.esmu.csv.gz"), header = T, sep = ",", row.names = 1)
+
+neurons$cell.type <- gsub("_(\\d+)_", "\\1.", neurons$cell.type)
+glia$cell.type <- gsub("_", " ", glia$cell.type)
+colnames(cellex_mouse) <- gsub("_(\\d+)_", "\\1.", colnames(cellex_mouse))
+colnames(cellex_rat) <- gsub("_(\\d+)_", "\\1.", colnames(cellex_rat))
+colnames(cellex_macaque) <- gsub("_(\\d+)_", "\\1.", colnames(cellex_macaque))
+```
+
+# 2d. Heatmap
+```{r}
+##############
+### Format ###
+##############
+
+threshold <- case_when(str_detect(spatial_meta$data.section, "Run2") ~ 0.002, str_detect(spatial_meta$data.section, "Run3") ~ 0.01)
+
+spatial_object$predicted.super.major.cell.type.corrected <- case_when(spatial_object$fox > threshold ~ "Ependymal_cells", TRUE ~ unname(spatial_object$predicted.super.major.cell.type))
+
+cell_order <- c("Glutamate", "GABA", "Acetylcholine", "Astrocytes", "Oligodendrocytes","OPCs","Microglia","Endothelial_cells","Ependymal_cells","Tanycytes","Pericytes","VLMCs")
+spatial_object$predicted.super.major.cell.type.corrected <- factor(spatial_object$predicted.super.major.cell.type.corrected, levels = cell_order)
+
+grouping_levels <- levels(as.factor(spatial_object$predicted.super.major.cell.type))
+colors <- c("#ff0000", "#0099ff", "#33cc33", "#ff33cc", "#ff9933" ,"#ffff00", "#663300", "#00cc99", "#999966", "#ff6666", "#669900","#003366")
+colors <- setNames(colors,grouping_levels)
+
+spatial_object@active.assay <- "SCT"
+#spatial_object@active.assay <- "integrated"
+
+#Subset cells with score more than 0.9
+spatial_object_subset <- subset(spatial_object,prediction.score.cell.type > 0.6)
+
+#Set the cell order as indicated by cell_order
+Idents(object = spatial_object_subset) <- spatial_object_subset$predicted.super.major.cell.type.corrected
+
+#spatial_object_subset <- PrepSCTFindMarkers(spatial_object_subset)
+
+#Find marker genes for each cell type
+spatial.markers <- FindAllMarkers(spatial_object_subset, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25,recorrect_umi = FALSE)
+
+
+#Get top genes for each cell type?? Maybe not necessarry?
+spatial.markers %>%
+  group_by(cluster) %>%
+  top_n(n = 5, wt = avg_log2FC) -> top10
+
+
+cell_type_colors <- rep("grey", length(cell_order))  # This will apply grey to all cell types
+names(cell_type_colors) <- cell_order
+```
+```{r}
+############
+### Plot ###
+############
+
+p1 <- DoHeatmap(spatial_object_subset, features = top10$gene, group.colors = cell_type_colors) + scale_fill_gradientn(colors = c("blue", "white", "red"))
+
+p1
+
+ggsave(paste0("heatmap_spatial.pdf"),  plot = p1, width = 5570, height = 2400, units = "px") # Made a pdf for the axes, and a png for the rasterized heatmap
+```
+
+# 2f. Feature plot of Calcr
+```{r}
+##############
+### Format ###
+##############
+
+# Cellex data
+cellex_species <- t(bind_rows(
+  mouse = cellex_mouse["Calcr", ],
+  rat = cellex_rat["Calcr", ],
+  macaque = cellex_macaque["Calcr", ]
+))
+colnames(cellex_species) <- c("mouse", "rat", "macaque")
+
+# Subset cell types
+mapped_cells <- c( # 31 spatially mapped cells
+  "Chat0.0", "GABA0.0", "GABA0.1", "GABA0.2", "GABA2.0", "GABA2.2", "GABA5.2", "Glu0.2", "Glu1.0", "Glu1.1",
+  "Glu1.2", "Glu1.3", "Glu1.4", "Glu2.0", "Glu2.1", "Glu2.2", "Glu2.3", "Glu3.1", "Glu3.2", "Glu3.3",
+  "Glu3.4", "Glu5.0", "Glu5.1", "Glu5.2", "Glu5.3", "Glu6.0", "Glu6.1", "Glu6.2", "Glu7.0", "Glu7.1",
+  "Glu7.2"
+)
+
+candidate_cells <- rownames(cellex_species)[apply(cellex_species, 1, function(x) any(x > 0.8, na.rm = TRUE))] # Select cell types with an EsMu > 0.8 in one or more species
+
+species_list <- list(
+  mouse = subset(neurons, dataset == "mouse.2023"),
+  rat = subset(neurons, species == "rat"),
+  macaque = subset(neurons, species == "macaque")
+)
+
+# Identify cells with Calcr expression > 5 in candidate cells for each species
+calcr_cells <- lapply(species_list, function(seurat_obj) {
+  DefaultAssay(seurat_obj) <- "RNA"
+  WhichCells(seurat_obj, expression = Calcr > 5 & seurat_obj$cell.type %in% candidate_cells)
+})
+
+# Prepare UMAP plot
+umap_embed_neurons <- as.data.frame(neurons@reductions$umap@cell.embeddings) %>%
+  mutate(
+    celltype = neurons$cell.type,
+    species = factor(neurons$species, levels = c("mouse", "rat", "macaque")),
+    calcr_expressed = rownames(.) %in% c(calcr_cells$mouse, calcr_cells$rat, calcr_cells$macaque),  # Label Calcr+ cells
+    color_group = ifelse(calcr_expressed, as.character(species), "Not expressed"),
+    color_group = factor(color_group, levels = c("mouse", "rat", "macaque", "Not expressed"))
+  ) %>%
+  sample_frac(1) %>%  # Shuffle rows
+  arrange(desc(color_group == "Not expressed"))  # Ensure background is plotted first, so real point on top of them, making them visible
+
+
+label <- umap_embed_neurons %>%
+  filter(calcr_expressed == TRUE & celltype %in% candidate_cells) %>%
+  group_by(celltype) %>%
+  summarize(
+    x = median(UMAP_1),
+    y = median(UMAP_2)
+  )
+```
+```{r}
+############
+### Plot ###
+############
+
+# Plot with labels only for cells where Calcr is expressed
+p <- ggplot(umap_embed_neurons, aes(x = UMAP_1, y = UMAP_2, colour = color_group)) +
+  geom_point_rast(size = 0.1, alpha = 0.5) +
+  theme_pubr(base_size = 6, base_family = "sans") +
+  theme(
+    axis.line = element_line(colour = "black", size = 0.4),
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    legend.position = "right",
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(face = "bold")
+  ) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  scale_color_manual(values = c("mouse" = "#75C0AF", "rat" = "#546577", "macaque" = "#DC7040", "Not expressed" = "grey"), name = "Calcr Expression") +
+  geom_text_repel(
+    data = label, aes(label = celltype, x = x, y = y),
+    size = 6 / ggplot2::.pt, # Consistent text size
+    fontface = "bold",
+    inherit.aes = FALSE
+  )
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figures/figure_2f.pdf", height = 4, width = 5)
+```
+
+# 2g. Marker gene plot
+```{r}
+##############
+### Format ###
+##############
+
+selected_cells <- c("Glu0.2", "Glu2.1", "Glu2.2", "Glu5.2","Glu6.0", "Glu6.2")
+genes <- c("Dlk1", "Olfr78", "Cacna1h", "Casr", "Ddc", "Dbh", "Prlh", "Ramp3", "Glp1r", "Calcr")
+
+for (i in seq_along(genes)) {
+
+  # Create one violin plot for each gene. Will be concatenated later into one plot
+  gene <- genes[i]
+  gene_data <- data.frame(expression = neurons@assays$SCT@data[gene, neurons$cell.type %in% selected_cells], 
+                          celltype = factor(neurons$cell.type[neurons$cell.type %in% selected_cells]),
+                          species = factor(neurons$species[neurons$cell.type %in% selected_cells], levels = c("mouse", "rat", "macaque")))
+
+  violin_plot <- ggplot(gene_data, aes(x = celltype, y = expression, color = celltype, fill = species)) + 
+    geom_violin(scale = "width", adjust = 1, show.legend = FALSE, size = 0.2, color = "black", width = 0.8) +
+    theme_pubr(base_size = 6, base_family = "sans") +
+    theme(
+      panel.grid = element_blank(),
+      axis.line.x = element_line(color = "black", size = 0.4),
+      axis.line.y = element_line(color = "black", size = 0.4),
+      axis.text.y = element_text(face = "bold"),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold.italic", angle = 360, vjust = 0.5),
+      plot.margin = unit(c(0, 0, 0, 0), "cm"),  # Removed negative bottom margin
+    ) +
+    xlab("") + 
+    ylab(gene) + 
+    scale_fill_manual(
+      values = c("#75C0AF", "#546577", "#DC7040"), 
+      name = "", 
+      labels = c("Mouse", "Rat", "Macaque")
+    ) + 
+    scale_y_continuous(breaks = c(0, floor(max(gene_data$expression))),
+    limits = c(0, NA))
+
+  assign(paste0("violin_plot", i), violin_plot)
+}
+```
+```{r}
+############
+### Plot ###
+############
+
+marker_plot <- plot_grid(
+  violin_plot1, violin_plot2, violin_plot3, violin_plot4, violin_plot5,
+  violin_plot6, violin_plot7, violin_plot8, violin_plot9, violin_plot10,
+  align = "v", 
+  ncol = 1, 
+  rel_heights = rep(0.8, 10))
+
+labels_plot <- ggplot(
+  data.frame(celltype = factor(selected_cells)),
+  aes(x = celltype, y = 1)) +
+  geom_blank() +
+  theme_void(base_size = 6, base_family = "sans") +
+  theme(
+    axis.text.x = element_text(face = "bold", angle = 45, hjust = 1), ) +
+  xlab("")
+
+p <- plot_grid(marker_plot, labels_plot, ncol = 1, rel_heights = c(10, 1))
+
+p
+
+ggsave("/projects/perslab/people/jmg776/projects/DVC/figures/figure_2g.pdf", height = 4, width = 5)
+```
